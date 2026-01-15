@@ -1,11 +1,12 @@
 {
-  "name": "rak-ceramics",
+  "name": "kilks",
   "version": "0.1.0",
   "private": true,
   "scripts": {
     "dev": "next dev --turbopack",
     "build": "next build --turbopack",
-    "start": "next start"
+    "start": "next start",
+    "export": "next export"
   },
   "dependencies": {
     "react": "19.1.0",

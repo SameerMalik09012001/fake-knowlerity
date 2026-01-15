@@ -1,103 +1,212 @@
-import Image from "next/image";
+'use client'
 
-export default function Home() {
+import { JSX, useEffect, useRef, useState } from "react";
+
+const WS_URL = "wss://qa-knowlarity-service.exei.ai/socket";
+
+type PlayAudioMessage = {
+  type: "playAudio";
+  data: {
+    audioContent: string; // base64 PCM16
+  };
+};
+
+type ServerMessage = PlayAudioMessage | Record<string, unknown>;
+
+export default function home(): JSX.Element {
+  const wsRef = useRef<WebSocket | null>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const micStreamRef = useRef<MediaStream | null>(null);
+  const processorRef = useRef<ScriptProcessorNode | null>(null);
+  const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const logRef = useRef<HTMLPreElement | null>(null);
+
+  const [connected, setConnected] = useState<boolean>(false);
+  const [streaming, setStreaming] = useState<boolean>(false);
+
+  const log = (msg: string): void => {
+    if (!logRef.current) return;
+    logRef.current.textContent += msg + "\n";
+    logRef.current.scrollTop = logRef.current.scrollHeight;
+  };
+
+  const floatTo16BitPCM = (input: Float32Array): ArrayBuffer => {
+    const buffer = new ArrayBuffer(input.length * 2);
+    const view = new DataView(buffer);
+
+    for (let i = 0; i < input.length; i++) {
+      let s = Math.max(-1, Math.min(1, input[i]));
+      view.setInt16(i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+    }
+
+    return buffer;
+  };
+
+  const connectWS = (): void => {
+    const ws = new WebSocket(WS_URL);
+    ws.binaryType = "arraybuffer";
+    wsRef.current = ws;
+
+    ws.onopen = (): void => {
+      log("WS connected");
+
+      const handshake = {
+        ivr_data: JSON.stringify({
+          clientId: "bbcf235b-f3c2-405f-aa57-2a4f9fed7bc6"
+        }),
+        callid: crypto.randomUUID(),
+        virtual_number: "9999999999",
+        customer_number: "8888888888",
+        client_meta_id: "meta_001",
+        event_timestamp: Date.now().toString()
+      };
+
+      ws.send(JSON.stringify(handshake));
+      log("Handshake sent");
+      setConnected(true);
+    };
+
+    ws.onclose = (): void => {
+      log("WS closed");
+      setConnected(false);
+    };
+
+    ws.onerror = (err: Event): void => {
+      log("WS error");
+      console.error(err);
+    };
+
+    ws.onmessage = (e: MessageEvent<string | ArrayBuffer>): void => {
+      if (typeof e.data !== "string") return;
+
+      try {
+        const msg: ServerMessage = JSON.parse(e.data);
+
+        if (
+          (msg as PlayAudioMessage).type === "playAudio" &&
+          (msg as PlayAudioMessage).data?.audioContent
+        ) {
+          playAudio((msg as PlayAudioMessage).data.audioContent);
+        }
+
+        log("Server msg: " + e.data);
+      } catch {
+        log("Server msg: " + e.data);
+      }
+    };
+  };
+
+  const playAudio = (base64PCM: string): void => {
+    if (!audioCtxRef.current) {
+      audioCtxRef.current = new AudioContext({ sampleRate: 16000 });
+    }
+
+    const audioCtx = audioCtxRef.current;
+    if (!audioCtx) return;
+
+    const binary = atob(base64PCM);
+    const pcm16 = new Int16Array(binary.length / 2);
+
+    for (let i = 0; i < binary.length; i += 2) {
+      pcm16[i / 2] =
+        binary.charCodeAt(i) |
+        (binary.charCodeAt(i + 1) << 8);
+    }
+
+    const float32 = new Float32Array(pcm16.length);
+    for (let i = 0; i < pcm16.length; i++) {
+      float32[i] = pcm16[i] / 32768;
+    }
+
+    const buffer = audioCtx.createBuffer(1, float32.length, audioCtx.sampleRate);
+    buffer.getChannelData(0).set(float32);
+
+    const source = audioCtx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(audioCtx.destination);
+    source.start();
+  };
+
+  const startMic = async (): Promise<void> => {
+    const audioCtx =
+      audioCtxRef.current ?? new AudioContext({ sampleRate: 16000 });
+    audioCtxRef.current = audioCtx;
+
+    await audioCtx.resume();
+
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    micStreamRef.current = stream;
+
+    const source = audioCtx.createMediaStreamSource(stream);
+    const processor = audioCtx.createScriptProcessor(4096, 1, 1);
+
+    source.connect(processor);
+    processor.connect(audioCtx.destination);
+
+    processor.onaudioprocess = (e: AudioProcessingEvent): void => {
+      const ws = wsRef.current;
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+      const input = e.inputBuffer.getChannelData(0);
+      ws.send(floatTo16BitPCM(input));
+    };
+
+    sourceRef.current = source;
+    processorRef.current = processor;
+
+    log("🎤 Mic streaming started");
+    setStreaming(true);
+  };
+
+  const stopMic = (): void => {
+    processorRef.current?.disconnect();
+    sourceRef.current?.disconnect();
+    micStreamRef.current?.getTracks().forEach(t => t.stop());
+
+    audioCtxRef.current?.close();
+    audioCtxRef.current = null;
+
+    setStreaming(false);
+    log("🛑 Mic streaming stopped");
+  };
+
+  useEffect(() => {
+    return () => {
+      wsRef.current?.close();
+      stopMic();
+    };
+  }, []);
+
   return (
-    <div className="font-sans grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20">
-      <main className="flex flex-col gap-[32px] row-start-2 items-center sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={180}
-          height={38}
-          priority
-        />
-        <ol className="font-mono list-inside list-decimal text-sm/6 text-center sm:text-left">
-          <li className="mb-2 tracking-[-.01em]">
-            Get started by editing{" "}
-            <code className="bg-black/[.05] dark:bg-white/[.06] font-mono font-semibold px-1 py-0.5 rounded">
-              src/app/page.tsx
-            </code>
-            .
-          </li>
-          <li className="tracking-[-.01em]">
-            Save and see your changes instantly.
-          </li>
-        </ol>
+    <div style={{ background: "#0f172a", color: "#e5e7eb", padding: 20 }}>
+      <h2>Fake Knowlarity WS Client</h2>
 
-        <div className="flex gap-4 items-center flex-col sm:flex-row">
-          <a
-            className="rounded-full border border-solid border-transparent transition-colors flex items-center justify-center bg-foreground text-background gap-2 hover:bg-[#383838] dark:hover:bg-[#ccc] font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 sm:w-auto"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={20}
-              height={20}
-            />
-            Deploy now
-          </a>
-          <a
-            className="rounded-full border border-solid border-black/[.08] dark:border-white/[.145] transition-colors flex items-center justify-center hover:bg-[#f2f2f2] dark:hover:bg-[#1a1a1a] hover:border-transparent font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 w-full sm:w-auto md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Read our docs
-          </a>
-        </div>
-      </main>
-      <footer className="row-start-3 flex gap-[24px] flex-wrap items-center justify-center">
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/file.svg"
-            alt="File icon"
-            width={16}
-            height={16}
-          />
-          Learn
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/window.svg"
-            alt="Window icon"
-            width={16}
-            height={16}
-          />
-          Examples
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/globe.svg"
-            alt="Globe icon"
-            width={16}
-            height={16}
-          />
-          Go to nextjs.org →
-        </a>
-      </footer>
+      <div className="mt-4">
+        <button className="bg-white px-2 py-1 rounded text-black" onClick={connectWS} disabled={connected}>
+        Connect
+      </button>
+
+      <button className="bg-white px-2 py-1 rounded text-black mx-3" onClick={startMic} disabled={!connected || streaming}>
+        Start Audio
+      </button>
+
+      <button className="bg-white px-2 py-1 rounded text-black" onClick={stopMic} disabled={!streaming}>
+        Stop Audio
+      </button>
+      </div>
+
+      <pre
+        ref={logRef}
+        style={{
+          background: "#30385eff",
+          padding: 10,
+          height: 900,
+          overflow: "auto",
+          borderRadius: 6,
+          fontSize: 12,
+          marginTop: 12
+        }}
+      />
     </div>
   );
 }
